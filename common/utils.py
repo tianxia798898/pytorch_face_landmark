@@ -56,35 +56,23 @@ def drawLandmark_multiple(img, bbox, landmark):
     - img marked with landmark and bbox
     '''
     # 移除检测框的绘制
-    
-    # 首先画出用于计算前额点的辅助线
-    if len(landmark) > 24:  # 确保有足够的关键点
-        # 计算并标注中点
-        mid_point1 = ((landmark[18] + landmark[19]) / 2).astype(np.int32)  # 点19和20的中点
-        mid_point2 = ((landmark[23] + landmark[24]) / 2).astype(np.int32)  # 点24和25的中点
-        
-        # 点2与中点1的连线
-        p2 = landmark[1].astype(np.int32)  # 点2
-        cv2.line(img, tuple(p2), tuple(mid_point1), (255,165,0), 1)  # 橙色线
-        cv2.circle(img, tuple(mid_point1), 2, (255,165,0), -1)  # 标注中点1
-        
-        # 点16与中点2的连线
-        p16 = landmark[15].astype(np.int32)  # 点16
-        cv2.line(img, tuple(p16), tuple(mid_point2), (255,165,0), 1)  # 橙色线
-        cv2.circle(img, tuple(mid_point2), 2, (255,165,0), -1)  # 标注中点2
-        
-        # 画延长线到前额点
-        if len(landmark) > 67:  # 确保前额点存在
+    # 如果最后一个点是前额点（用户逻辑会把它放在最后），则画一条从第9个点(索引8)向上的线段到该额头点
+    if len(landmark) >= 9:
+        # 若存在额头点（假定为最后一个点）且与第9点不相同，则画线
+        if len(landmark) >= 69:  # 当包含额头点并且总点数>=69时，最后一个为第68号
+            p9 = landmark[8].astype(np.int32)
             forehead_point = landmark[-1].astype(np.int32)
-            # 画从中点到交点的线
-            cv2.line(img, tuple(mid_point1), tuple(forehead_point), (147,20,255), 1)  # 紫色线
-            cv2.line(img, tuple(mid_point2), tuple(forehead_point), (147,20,255), 1)  # 紫色线
+            # 画从第9点到额头点的线段（紫色）
+            cv2.line(img, tuple(p9), tuple(forehead_point), (147,20,255), 2)
+        else:
+            # 如果没有额头点（旧逻辑），不画额头线
+            pass
     
     # 画所有关键点和标号
     for i, (x, y) in enumerate(landmark):
         x, y = int(x), int(y)
         # 对于前额点（最后一个点）使用不同的颜色和大小
-        if i == len(landmark) - 1:  # 前额点
+        if i == len(landmark) - 1 and len(landmark) >= 69:  # 前额点，显示为68号（当包含前额点时）
             cv2.circle(img, (x, y), 3, (0,0,255), -1)  # 红色，大一点的圆
             cv2.putText(img, "68", (x+2, y+2), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,255), 1)
         else:

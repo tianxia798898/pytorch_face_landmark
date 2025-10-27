@@ -15,8 +15,8 @@ from tqdm import tqdm
 import torch
 import torchvision.transforms as transforms
 
-from models.bisenet import BiSeNet
-from utils.common import vis_parsing_maps
+from .models.bisenet import BiSeNet
+from .utils.common import vis_parsing_maps
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
