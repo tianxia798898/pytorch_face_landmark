@@ -1,180 +1,246 @@
-# Face alignment and crop demo
-# Uses MTCNN, FaceBoxes or Retinaface as a face detector;
-# Support different backbones, include PFLD, MobileFaceNet, MobileNet;
-# Retinaface+MobileFaceNet gives the best peformance
-# Cunjian Chen (ccunjian@gmail.com), Feb. 2021
-
-from __future__ import division
-import argparse
 import torch
-import os
 import cv2
 import numpy as np
-from common.utils import BBox,drawLandmark,drawLandmark_multiple
-from models.basenet import MobileNet_GDConv
-from models.pfld_compressed import PFLDInference
-from models.mobilefacenet import MobileFaceNet
-from FaceBoxes import FaceBoxes
-from Retinaface import Retinaface
-from PIL import Image
-import matplotlib.pyplot as plt
-from MTCNN import detect_faces
+import os
 import glob
-import time
-from utils.align_trans import get_reference_facial_points, warp_and_crop_face
+import argparse
+from PIL import Image
+import torchvision.transforms as transforms
+from models.mobilefacenet import MobileFaceNet
+from models.pfld_compressed import PFLDInference
+from models.basenet import MobileNet_GDConv
+from common.utils import BBox, drawLandmark_multiple
 
+# 设置参数
 parser = argparse.ArgumentParser(description='PyTorch face landmark')
-# Datasets
-parser.add_argument('--backbone', default='hr18', type=str,
+parser.add_argument('--backbone', default='MobileNet',
                     help='choose which backbone network to use: MobileNet, PFLD, MobileFaceNet')
-parser.add_argument('--detector', default='FaceBoxes', type=str,
+parser.add_argument('--detector', default='MTCNN',
                     help='choose which face detector to use: MTCNN, FaceBoxes, Retinaface')
-
+parser.add_argument('--output_dir', default='results',
+                    help='output directory to save results')
 args = parser.parse_args()
-mean = np.asarray([ 0.485, 0.456, 0.406 ])
-std = np.asarray([ 0.229, 0.224, 0.225 ])
+args.input_dir = 'val'  # 固定使用val2目录
 
-crop_size= 112
-scale = crop_size / 112.
-reference = get_reference_facial_points(default_square = True) * scale
-
-if torch.cuda.is_available():
-    map_location=lambda storage, loc: storage.cuda()
-else:
-    map_location='cpu'
+# 设置设备
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+map_location = device
 
 def load_model():
-    if args.backbone=='MobileNet':
-        model = MobileNet_GDConv(136)
-        model = torch.nn.DataParallel(model)
-        # download model from https://drive.google.com/file/d/1Le5UdpMkKOTRr1sTp4lwkw8263sbgdSe/view?usp=sharing
-        checkpoint = torch.load('checkpoint/mobilenet_224_model_best_gdconv_external.pth.tar', map_location=map_location)
-        print('Use MobileNet as backbone')
-    elif args.backbone=='PFLD':
-        model = PFLDInference() 
-        # download from https://drive.google.com/file/d/1gjgtm6qaBQJ_EY7lQfQj3EuMJCVg9lVu/view?usp=sharing
-        checkpoint = torch.load('checkpoint/pfld_model_best.pth.tar', map_location=map_location)
-        print('Use PFLD as backbone') 
-        # download from https://drive.google.com/file/d/1T8J73UTcB25BEJ_ObAJczCkyGKW5VaeY/view?usp=sharing
-    elif args.backbone=='MobileFaceNet':
-        model = MobileFaceNet([112, 112],136)   
+    model = None
+    checkpoint = None
+    
+    # 默认使用MobileFaceNet作为backbone
+    def load_mobilefacenet():
+        nonlocal model, checkpoint
+        model = MobileFaceNet([112, 112], 136)   
         checkpoint = torch.load('checkpoint/mobilefacenet_model_best.pth.tar', map_location=map_location)      
-        print('Use MobileFaceNet as backbone')         
-    else:
-        print('Error: not suppored backbone')    
+        print('Use MobileFaceNet as backbone')
+    
+    try:
+        if args.backbone == 'MobileNet':
+            print('MobileNet backbone is not available, fallback to MobileFaceNet')
+            load_mobilefacenet()
+        elif args.backbone == 'PFLD':
+            model = PFLDInference() 
+            checkpoint = torch.load('checkpoint/pfld_model_best.pth.tar', map_location=map_location)
+            print('Use PFLD as backbone') 
+        elif args.backbone == 'MobileFaceNet':
+            load_mobilefacenet()
+        else:
+            print(f'Warning: unsupported backbone "{args.backbone}", fallback to MobileFaceNet')
+            load_mobilefacenet()
+    except Exception as e:
+        print(f'Error loading backbone "{args.backbone}": {e}. Fallback to MobileFaceNet.')
+        load_mobilefacenet()
+
+    if model is None or checkpoint is None:
+        raise RuntimeError('Failed to initialize model and checkpoint!')
+
     model.load_state_dict(checkpoint['state_dict'])
+    model.eval()
     return model
 
-if __name__ == '__main__':
-    if args.backbone=='MobileNet':
-        out_size = 224
+def init_face_detector():
+    if args.detector == 'MTCNN':
+        from MTCNN.detector import detect_faces
+        return detect_faces
+    elif args.detector == 'FaceBoxes':
+        from FaceBoxes.FaceBoxes import FaceBoxes
+        return FaceBoxes()
+    elif args.detector == 'Retinaface':
+        from Retinaface.Retinaface import Retinaface
+        return Retinaface()
     else:
-        out_size = 112 
-    model = load_model()
-    model = model.eval()
-    filenames=glob.glob("samples/12--Group/*.jpg")
-    for imgname in filenames:
-        print(imgname)
-        img = cv2.imread(imgname)
-        org_img = Image.open(imgname)
-        height,width,_=img.shape
-        if args.detector=='MTCNN':
-            # perform face detection using MTCNN
-            image = Image.open(imgname)
-            faces, landmarks = detect_faces(image)
-        elif args.detector=='FaceBoxes':
-            face_boxes = FaceBoxes()
-            faces = face_boxes(img)
-        elif args.detector=='Retinaface':
-            retinaface=Retinaface.Retinaface()    
-            faces = retinaface(img)            
-        else:
-            print('Error: not suppored detector')        
-        ratio=0
-        if len(faces)==0:
-            print('NO face is detected!')
-            continue
-        for k, face in enumerate(faces): 
-            if face[4]<0.9: # remove low confidence detection
-                continue
-            x1=face[0]
-            y1=face[1]
-            x2=face[2]
-            y2=face[3]
-            w = x2 - x1 + 1
-            h = y2 - y1 + 1
-            size = int(min([w, h])*1.2)
-            cx = x1 + w//2
-            cy = y1 + h//2
-            x1 = cx - size//2
-            x2 = x1 + size
-            y1 = cy - size//2
-            y2 = y1 + size
+        print(f'Warning: unsupported detector "{args.detector}", fallback to MTCNN')
+        from MTCNN.detector import detect_faces
+        return detect_faces
 
-            dx = max(0, -x1)
-            dy = max(0, -y1)
-            x1 = max(0, x1)
-            y1 = max(0, y1)
+def process_image(image_path, model, face_detector, to_tensor, resize):
+    # 读取图片
+    img = cv2.imread(image_path)
+    if img is None:
+        print(f"无法读取图片: {image_path}")
+        return None
+    
+    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    img_pil = Image.fromarray(img_rgb)
+    
+    # 人脸检测
+    if args.detector == 'MTCNN':
+        boxes, landmarks = face_detector(img_pil)
+        if len(boxes) == 0:
+            print(f"未检测到人脸: {image_path}")
+            return None
+        boxes = boxes[:, 0:4].astype(np.int32)
+    else:
+        boxes = face_detector(img)
+        if len(boxes) == 0:
+            print(f"未检测到人脸: {image_path}")
+            return None
+        boxes = np.array([box[:4] for box in boxes]).astype(np.int32)
+    
+    result_img = img.copy()
+    landmarks_all = []
+    
+    # 对每个检测到的人脸进行关键点检测
+    for box in boxes:
+        x1, y1, x2, y2 = box
+        w = x2 - x1 + 1
+        h = y2 - y1 + 1
+        size = int(max([w, h])*1.1)
+        cx = x1 + w//2
+        cy = y1 + h//2
+        x1 = cx - size//2
+        x2 = x1 + size
+        y1 = cy - size//2
+        y2 = y1 + size
+        
+        # 处理边界情况
+        dx = max(0, -x1)
+        dy = max(0, -y1)
+        x1 = max(0, x1)
+        y1 = max(0, y1)
+        edx = max(0, x2 - img.shape[1])
+        edy = max(0, y2 - img.shape[0])
+        x2 = min(img.shape[1], x2)
+        y2 = min(img.shape[0], y2)
 
-            edx = max(0, x2 - width)
-            edy = max(0, y2 - height)
-            x2 = min(width, x2)
-            y2 = min(height, y2)
-            new_bbox = list(map(int, [x1, x2, y1, y2]))
-            new_bbox = BBox(new_bbox)
-            cropped=img[new_bbox.top:new_bbox.bottom,new_bbox.left:new_bbox.right]
-            if (dx > 0 or dy > 0 or edx > 0 or edy > 0):
-                cropped = cv2.copyMakeBorder(cropped, int(dy), int(edy), int(dx), int(edx), cv2.BORDER_CONSTANT, 0)            
-            cropped_face = cv2.resize(cropped, (out_size, out_size))
+        new_bbox = list(map(int, [x1, x2, y1, y2]))
+        new_bbox = BBox(new_bbox)
+        cropped = img[new_bbox.top:new_bbox.bottom, new_bbox.left:new_bbox.right]
+        
+        if (dx > 0 or dy > 0 or edx > 0 or edy > 0):
+            cropped = cv2.copyMakeBorder(cropped, int(dy), int(edy), int(dx), int(edx), cv2.BORDER_CONSTANT, 0)
+        
+        cropped = cv2.cvtColor(cropped, cv2.COLOR_BGR2RGB)
+        cropped = Image.fromarray(cropped)
+        test_face = resize(cropped)
+        test_face = to_tensor(test_face)
+        test_face.unsqueeze_(0)
+        test_face = test_face.to(device)
+        
+        # 关键点检测
+        with torch.no_grad():
+            landmarks = model(test_face)
+            if isinstance(landmarks, tuple):
+                landmarks = landmarks[0]  # 如果模型返回tuple，取第一个元素
+        landmarks = landmarks.cpu().numpy()
+        landmarks = landmarks.reshape(-1, 2)
+        landmarks = new_bbox.reprojectLandmark(landmarks)
+        
+        # 计算新的前额点
+        def get_line_intersection(p1, p2, p3, p4):
+            """计算两条直线的交点"""
+            x1, y1 = p1
+            x2, y2 = p2
+            x3, y3 = p3
+            x4, y4 = p4
+            
+            denom = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
+            if abs(denom) < 1e-10:  # 平行线
+                return None
+                
+            px = ((x1*y2 - y1*x2) * (x3 - x4) - (x1 - x2) * (x3*y4 - y3*x4)) / denom
+            py = ((x1*y2 - y1*x2) * (y3 - y4) - (y1 - y2) * (x3*y4 - y3*x4)) / denom
+            
+            return np.array([px, py])
 
-            if cropped_face.shape[0]<=0 or cropped_face.shape[1]<=0:
-                continue
-            test_face = cropped_face.copy()
-            test_face = test_face/255.0
-            if args.backbone=='MobileNet':
-                test_face = (test_face-mean)/std
-            test_face = test_face.transpose((2, 0, 1))
-            test_face = test_face.reshape((1,) + test_face.shape)
-            input = torch.from_numpy(test_face).float()
-            input= torch.autograd.Variable(input)
-            start = time.time()
-            if args.backbone=='MobileFaceNet':
-                landmark = model(input)[0].cpu().data.numpy()
-            else:
-                landmark = model(input).cpu().data.numpy()
-            end = time.time()
-            print('Time: {:.6f}s.'.format(end - start))
-            landmark = landmark.reshape(-1,2)
-            landmark = new_bbox.reprojectLandmark(landmark)
-            img = drawLandmark_multiple(img, new_bbox, landmark)
-            # crop and aligned the face
-            lefteye_x=0
-            lefteye_y=0
-            for i in range(36,42):
-                lefteye_x+=landmark[i][0]
-                lefteye_y+=landmark[i][1]
-            lefteye_x=lefteye_x/6
-            lefteye_y=lefteye_y/6
-            lefteye=[lefteye_x,lefteye_y]
+        def extend_line(p1, p2, factor=2.0):
+            """延长线段"""
+            direction = p2 - p1
+            return p2 + direction * factor
 
-            righteye_x=0
-            righteye_y=0
-            for i in range(42,48):
-                righteye_x+=landmark[i][0]
-                righteye_y+=landmark[i][1]
-            righteye_x=righteye_x/6
-            righteye_y=righteye_y/6
-            righteye=[righteye_x,righteye_y]  
+        # 计算第一条线 l1（点2与点19、20的中点连线）
+        p2 = landmarks[1]  # 点2 (索引1对应标号2)
+        mid_point1 = (landmarks[18] + landmarks[19]) / 2  # 点19和20的中点
+        l1_extended = extend_line(p2, mid_point1)
 
-            nose=landmark[33]
-            leftmouth=landmark[48]
-            rightmouth=landmark[54]
-            facial5points=[righteye,lefteye,nose,rightmouth,leftmouth]
-            warped_face = warp_and_crop_face(np.array(org_img), facial5points, reference, crop_size=(crop_size, crop_size))
-            img_warped = Image.fromarray(warped_face)
-            # save the aligned and cropped faces
-            img_warped.save(os.path.join('results_aligned', os.path.basename(imgname)[:-4]+'_'+str(k)+'.png'))  
-            #img = drawLandmark_multiple(img, new_bbox, facial5points)  # plot and show 5 points   
-        # save the landmark detections 
-        cv2.imwrite(os.path.join('results',os.path.basename(imgname)),img)
+        # 计算第二条线 l2（点16与点24、25的中点连线）
+        p16 = landmarks[15]  # 点16 (索引15对应标号16)
+        mid_point2 = (landmarks[23] + landmarks[24]) / 2  # 点24和25的中点
+        l2_extended = extend_line(p16, mid_point2)
 
+        # 计算两条延长线的交点作为新的前额点
+        forehead_point = get_line_intersection(p2, l1_extended, p16, l2_extended)
+        
+        # 如果没有找到有效的交点，使用备用方法
+        if forehead_point is None:
+            print("警告：无法计算延长线交点，使用备用方法计算前额点")
+            # 使用两条延长线的中点作为前额点
+            forehead_point = (l1_extended + l2_extended) / 2
+        
+        # 将前额点添加到landmarks中
+        landmarks = np.vstack([landmarks, forehead_point])
+        landmarks_all.append(landmarks)
+        
+        # 绘制关键点
+        result_img = drawLandmark_multiple(result_img, new_bbox, landmarks)
+    
+    return result_img
+
+if __name__ == '__main__':
+    try:
+        # 初始化模型和预处理
+        model = load_model()
+        model = model.to(device)
+        model.eval()
+        print("模型加载成功！")
+        
+        # 初始化人脸检测器
+        face_detector = init_face_detector()
+        print(f"使用 {args.detector} 作为人脸检测器")
+        
+        # 设置图像预处理
+        resize = transforms.Resize([112, 112])
+        to_tensor = transforms.ToTensor()
+        
+        # 创建输出目录
+        os.makedirs(args.output_dir, exist_ok=True)
+        
+        # 获取输入目录中的所有图片
+        image_files = []
+        for ext in ['jpg', 'jpeg', 'png']:
+            image_files.extend(glob.glob(os.path.join(args.input_dir, f'*.{ext}')))
+        
+        if not image_files:
+            print(f"在{args.input_dir}目录中未找到图片文件")
+            exit(1)
+            
+        print(f"找到{len(image_files)}张图片")
+        
+        # 处理每张图片
+        for image_path in image_files:
+            print(f"处理图片: {image_path}")
+            result_img = process_image(image_path, model, face_detector, to_tensor, resize)
+            
+            if result_img is not None:
+                # 保存结果
+                output_path = os.path.join(args.output_dir, os.path.basename(image_path))
+                cv2.imwrite(output_path, result_img)
+                print(f"结果已保存到: {output_path}")
+        
+        print("批量处理完成！")
+        
+    except Exception as e:
+        print(f"错误: {str(e)}")

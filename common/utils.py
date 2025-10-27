@@ -55,9 +55,43 @@ def drawLandmark_multiple(img, bbox, landmark):
     Output:
     - img marked with landmark and bbox
     '''
-    cv2.rectangle(img, (bbox.left, bbox.top), (bbox.right, bbox.bottom), (0,0,255), 2)
-    for x, y in landmark:
-        cv2.circle(img, (int(x), int(y)), 2, (0,255,0), -1)
+    # 移除检测框的绘制
+    
+    # 首先画出用于计算前额点的辅助线
+    if len(landmark) > 24:  # 确保有足够的关键点
+        # 计算并标注中点
+        mid_point1 = ((landmark[18] + landmark[19]) / 2).astype(np.int32)  # 点19和20的中点
+        mid_point2 = ((landmark[23] + landmark[24]) / 2).astype(np.int32)  # 点24和25的中点
+        
+        # 点2与中点1的连线
+        p2 = landmark[1].astype(np.int32)  # 点2
+        cv2.line(img, tuple(p2), tuple(mid_point1), (255,165,0), 1)  # 橙色线
+        cv2.circle(img, tuple(mid_point1), 2, (255,165,0), -1)  # 标注中点1
+        
+        # 点16与中点2的连线
+        p16 = landmark[15].astype(np.int32)  # 点16
+        cv2.line(img, tuple(p16), tuple(mid_point2), (255,165,0), 1)  # 橙色线
+        cv2.circle(img, tuple(mid_point2), 2, (255,165,0), -1)  # 标注中点2
+        
+        # 画延长线到前额点
+        if len(landmark) > 67:  # 确保前额点存在
+            forehead_point = landmark[-1].astype(np.int32)
+            # 画从中点到交点的线
+            cv2.line(img, tuple(mid_point1), tuple(forehead_point), (147,20,255), 1)  # 紫色线
+            cv2.line(img, tuple(mid_point2), tuple(forehead_point), (147,20,255), 1)  # 紫色线
+    
+    # 画所有关键点和标号
+    for i, (x, y) in enumerate(landmark):
+        x, y = int(x), int(y)
+        # 对于前额点（最后一个点）使用不同的颜色和大小
+        if i == len(landmark) - 1:  # 前额点
+            cv2.circle(img, (x, y), 3, (0,0,255), -1)  # 红色，大一点的圆
+            cv2.putText(img, "68", (x+2, y+2), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,255), 1)
+        else:
+            # 画其他关键点
+            cv2.circle(img, (x, y), 2, (0,255,0), -1)
+            # 写序号，序号位置稍微偏移以免遮挡点
+            cv2.putText(img, str(i+1), (x+2, y+2), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (255,0,0), 1)  # i+1 使标号从1开始
     return img
 
 def drawLandmark_Attribute(img, bbox, landmark,gender,age):
