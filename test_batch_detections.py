@@ -25,9 +25,9 @@ from utils.align_trans import get_reference_facial_points, warp_and_crop_face
 
 parser = argparse.ArgumentParser(description='PyTorch face landmark')
 # Datasets
-parser.add_argument('--backbone', default='MobileFaceNet', type=str,
+parser.add_argument('--backbone', default='hr18', type=str,
                     help='choose which backbone network to use: MobileNet, PFLD, MobileFaceNet')
-parser.add_argument('--detector', default='Retinaface', type=str,
+parser.add_argument('--detector', default='FaceBoxes', type=str,
                     help='choose which face detector to use: MTCNN, FaceBoxes, Retinaface')
 
 args = parser.parse_args()
