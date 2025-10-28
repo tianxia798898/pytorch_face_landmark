@@ -21,7 +21,7 @@ parser.add_argument('--detector', default='MTCNN',
 parser.add_argument('--output_dir', default='results',
                     help='output directory to save results')
 args = parser.parse_args()
-args.input_dir = 'val'  # 固定使用val2目录
+args.input_dir = 'val2'  # 固定使用val2目录
 
 # 设置设备
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -204,21 +204,98 @@ def process_image(image_path, model, face_detector, to_tensor, resize, parsing_m
         landmarks = landmarks.reshape(-1, 2)
         landmarks = new_bbox.reprojectLandmark(landmarks)
 
-        # 先尝试使用分割掩码：以第9个点为起点向上搜索掩码中的第一个像素作为额头点
+        # 先使用分割掩码：用 landmarks[9,28,29,30,31]（1-based）拟合一条直线 l，
+        # 然后沿该直线从图像顶部向下采样，找到与人脸分割（seg_mask>0）最上方的交点 P 作为额头点
         forehead_point = None
         try:
             if seg_mask is not None:
-                x0 = int(round(landmarks[8][0]))
-                y0 = int(round(landmarks[8][1]))
-                x0 = np.clip(x0, 0, seg_mask.shape[1]-1)
-                y0 = np.clip(y0, 0, seg_mask.shape[0]-1)
-                mask_face = (seg_mask > 0)
-                # 从 y0 向上搜索
-                for yy in range(y0, -1, -1):
-                    if mask_face[yy, x0]:
-                        forehead_point = np.array([x0, yy], dtype=np.float32)
-                        break
-        except Exception:
+                h, w = seg_mask.shape[0], seg_mask.shape[1]
+                # 使用 1-based 索引 9,28,29,30,31 -> 0-based 索引
+                fit_indices = [8, 27, 28, 29, 30]
+                pts = []
+                for idx in fit_indices:
+                    if idx >= 0 and idx < len(landmarks):
+                        pts.append(landmarks[idx])
+                pts = np.array(pts, dtype=np.float32)
+
+                if pts.shape[0] >= 2:
+                    # 拟合直线 y = a*x + b（用最小二乘拟合）
+                    xs = pts[:, 0]
+                    ys = pts[:, 1]
+                    # 检查是否近似竖直（x 方差很小）
+                    if np.allclose(xs.max(), xs.min()):
+                        vertical = True
+                        x_fixed = int(round(xs.mean()))
+                    else:
+                        vertical = False
+                        a, b = np.polyfit(xs, ys, 1)  # ys = a*xs + b
+
+                    # 从图像顶部向下扫描 y，从 0 到 h-1，计算 linea 上对应的 x 并检查 mask
+                    # 更严格的“人脸类别”过滤：只把语义上属于脸部的分割类别视为面部（排除 hair）
+                    # 根据 face_parsing/utils/common.py 中的类别顺序，类别编号为：
+                    # 1: skin, 2: l_brow, 3: r_brow, 4: l_eye, 5: r_eye, 6: eye_g,
+                    # 10: nose, 11: mouth, 12: u_lip, 13: l_lip
+                    face_categories = {1, 2, 3, 4, 5, 6, 10, 11, 12, 13}
+                    bin_mask = np.isin(seg_mask, list(face_categories)).astype(np.uint8)
+                    # 计算连通域，用于区分头发/背景/脸部
+                    try:
+                        num_cc, labels_im = cv2.connectedComponents(bin_mask, connectivity=8)
+                    except Exception:
+                        # OpenCV 版本或输入有问题，回退到简单掩码检测
+                        labels_im = bin_mask
+                        num_cc = int(labels_im.max()) + 1
+
+                    # 以面部关键点的质心选择目标连通域（fallback到最大连通域）
+                    lm_center = np.mean(landmarks, axis=0)
+                    cx_center = int(np.clip(int(round(lm_center[0])), 0, w-1))
+                    cy_center = int(np.clip(int(round(lm_center[1])), 0, h-1))
+                    face_label = int(labels_im[cy_center, cx_center]) if labels_im is not None else 0
+                    if face_label == 0:
+                        # 选择面积最大的连通域（排除背景标签0）
+                        counts = np.bincount(labels_im.flatten())
+                        if counts.size > 1:
+                            # 忽略背景
+                            counts[0] = 0
+                            face_label = int(np.argmax(counts))
+
+                    found = None
+                    for yy in range(0, h):
+                        if vertical:
+                            xx = x_fixed
+                        else:
+                            # x = (y - b) / a
+                            if abs(a) < 1e-8:
+                                continue
+                            xx = int(round((yy - b) / a))
+
+                        if xx < 0 or xx >= w:
+                            continue
+
+                        # 在 x 附近也检查少量像素宽度以兼容离散化误差
+                        xs_to_check = [xx]
+                        if xx - 1 >= 0:
+                            xs_to_check.append(xx - 1)
+                        if xx + 1 < w:
+                            xs_to_check.append(xx + 1)
+
+                        hit = False
+                        for xc in xs_to_check:
+                            # 要求该像素属于面部连通域
+                            if labels_im[yy, xc] == face_label:
+                                found = (xc, yy)
+                                hit = True
+                                break
+                        if hit:
+                            break
+
+                    if found is not None:
+                        forehead_point = np.array(found, dtype=np.float32)
+                    else:
+                        forehead_point = None
+                else:
+                    forehead_point = None
+        except Exception as e:
+            print(f"警告：基于拟合直线与分割掩码求额头点失败，回退备用方法：{e}")
             forehead_point = None
 
         # 备用：基于延长线交点的方法
